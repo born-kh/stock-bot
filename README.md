@@ -50,6 +50,12 @@ npm run server:startup:windows
 
 This creates a Scheduled Task (`stock-bot-pm2-resurrect`) that runs on system startup and executes `npx pm2 resurrect`.
 
+If PM2 fails after reboot with `Error: connect EPERM \\.\pipe\rpc.sock`, run:
+
+```bash
+npm run server:repair:windows
+```
+
 ## Commands
 
 - `/start` — help

@@ -14,6 +14,7 @@
     "server:save": "npx pm2 save",
     "server:resurrect": "npx pm2 resurrect",
     "server:startup:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/setup-pm2-startup-windows.ps1",
+    "server:repair:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/repair-pm2-windows.ps1",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

@@ -24,6 +24,32 @@ Set `BOT_TOKEN` in `.env`.
 npm start
 ```
 
+## PM2 (server)
+
+```bash
+npm run server
+```
+
+Useful commands:
+
+- `npm run server:status` - PM2 status
+- `npm run server:logs` - live logs
+- `npm run server:restart` - restart bot
+- `npm run server:stop` - stop bot
+- `npm run server:save` - save current PM2 process list
+- `npm run server:resurrect` - restore saved PM2 process list
+
+### Windows Server auto-start after reboot
+
+Run once as Administrator:
+
+```bash
+npm run server
+npm run server:startup:windows
+```
+
+This creates a Scheduled Task (`stock-bot-pm2-resurrect`) that runs on system startup and executes `npx pm2 resurrect`.
+
 ## Commands
 
 - `/start` — help

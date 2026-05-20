@@ -22,16 +22,6 @@ const yahooFinance = new YahooFinance({
   suppressNotices: ["yahooSurvey"],
 });
 
-// Simple in-memory cache (0 = always fetch fresh quote from Yahoo)
-const quoteCache = new Map(); // symbol -> { ts, data }
-const _ttl = Number(process.env.QUOTE_TTL_MS);
-const QUOTE_TTL_MS =
-  process.env.QUOTE_TTL_MS === undefined || process.env.QUOTE_TTL_MS === ""
-    ? 0
-    : Number.isFinite(_ttl) && _ttl >= 0
-      ? _ttl
-      : 0;
-
 // Lightweight per-chat rate limit
 const lastRequestByChat = new Map(); // chatId -> ms
 const MIN_REQUEST_INTERVAL_MS = Number(
@@ -54,13 +44,11 @@ function currencyDisplayPrefix(currency) {
   return `${c} `;
 }
 
-/** Короткая цена: $220 или $12.18 */
+/** Цена всегда с центами: $220.61 */
 function formatMoneyCompact(currency, value) {
   if (value == null || Number.isNaN(Number(value))) return "—";
   const num = Number(value);
-  const d = Math.abs(num) >= 100 ? 0 : 2;
-  let s = num.toFixed(d);
-  if (d > 0) s = s.replace(/\.?0+$/, "");
+  const s = num.toFixed(2);
   return `${currencyDisplayPrefix(currency)}${s}`;
 }
 
@@ -104,101 +92,250 @@ function compactSessionLine(label, currency, price, change, changePct) {
   return `${label}: ${pr}`;
 }
 
-/** Пре/пост для строки PM */
-function pickExtendedSession(q) {
-  const st = String(q?.marketState || "").toUpperCase();
-  const reg = q?.regularMarketPrice;
-  if ((st === "POST" || st === "POSTPOST") && q?.postMarketPrice != null) {
-    return {
-      price: q.postMarketPrice,
-      change: q.postMarketChange,
-      pct: q.postMarketChangePercent,
-    };
+function sessionFields(label, price, change, pct) {
+  if (price == null || Number.isNaN(Number(price))) return null;
+  return { label, price, change: change ?? null, pct: pct ?? null };
+}
+
+/** Yahoo quoteSummary (formatted) отдаёт числа в { raw }, иначе — как есть. */
+function yahooNum(value) {
+  if (value == null) return null;
+  if (typeof value === "number") return value;
+  if (typeof value === "object" && value.raw != null) {
+    const n = Number(value.raw);
+    return Number.isNaN(n) ? null : n;
   }
-  if ((st === "PRE" || st === "PREPRE") && q?.preMarketPrice != null) {
-    return {
-      price: q.preMarketPrice,
-      change: q.preMarketChange,
-      pct: q.preMarketChangePercent,
-    };
+  const n = Number(value);
+  return Number.isNaN(n) ? null : n;
+}
+
+/** В quoteSummary change% — доля (0.0124 = 1.24%); в quote() — уже проценты. */
+function yahooChangePercent(value) {
+  const n = yahooNum(value);
+  if (n == null) return null;
+  if (typeof value === "object" && value.raw != null) return n * 100;
+  return n;
+}
+
+function normalizeQuoteSummaryPrice(p) {
+  if (!p) return null;
+  const prev = yahooNum(p.regularMarketPreviousClose);
+  return {
+    currency: p.currency,
+    marketState: p.marketState,
+    regularMarketPrice: yahooNum(p.regularMarketPrice),
+    regularMarketChange: yahooNum(p.regularMarketChange),
+    regularMarketChangePercent: yahooChangePercent(p.regularMarketChangePercent),
+    regularMarketPreviousClose: prev,
+    previousClose: prev,
+    preMarketPrice: yahooNum(p.preMarketPrice),
+    preMarketChange: yahooNum(p.preMarketChange),
+    preMarketChangePercent: yahooChangePercent(p.preMarketChangePercent),
+    postMarketPrice: yahooNum(p.postMarketPrice),
+    postMarketChange: yahooNum(p.postMarketChange),
+    postMarketChangePercent: yahooChangePercent(p.postMarketChangePercent),
+    overnightMarketPrice: yahooNum(p.overnightMarketPrice),
+    overnightMarketChange: yahooNum(p.overnightMarketChange),
+    overnightMarketChangePercent: yahooChangePercent(
+      p.overnightMarketChangePercent,
+    ),
+  };
+}
+
+function overnightSessionFields(q) {
+  if (q?.overnightMarketPrice == null) return null;
+  return sessionFields(
+    "PM",
+    q.overnightMarketPrice,
+    q.overnightMarketChange,
+    q.overnightMarketChangePercent,
+  );
+}
+
+/** Локальное правило: в будни после 05:00 показываем premarket, иначе postmarket. */
+function pickExtendedByLocalClock(q, now = new Date()) {
+  const day = now.getDay(); // 0=Sun ... 6=Sat
+  const isWorkday = day >= 1 && day <= 5;
+  const hour = now.getHours();
+  const preferPre = isWorkday && hour >= 5;
+
+  if (preferPre && q?.preMarketPrice != null) {
+    return sessionFields(
+      "PM",
+      q.preMarketPrice,
+      q.preMarketChange,
+      q.preMarketChangePercent,
+    );
   }
-  if (
-    q?.postMarketPrice != null &&
-    reg != null &&
-    Math.abs(Number(q.postMarketPrice) - Number(reg)) > 1e-4
-  ) {
-    return {
-      price: q.postMarketPrice,
-      change: q.postMarketChange,
-      pct: q.postMarketChangePercent,
-    };
+  if (q?.postMarketPrice != null) {
+    return sessionFields(
+      "PM",
+      q.postMarketPrice,
+      q.postMarketChange,
+      q.postMarketChangePercent,
+    );
   }
-  if (
-    q?.preMarketPrice != null &&
-    reg != null &&
-    Math.abs(Number(q.preMarketPrice) - Number(reg)) > 1e-4
-  ) {
-    return {
-      price: q.preMarketPrice,
-      change: q.preMarketChange,
-      pct: q.preMarketChangePercent,
-    };
+  if (q?.preMarketPrice != null) {
+    return sessionFields(
+      "PM",
+      q.preMarketPrice,
+      q.preMarketChange,
+      q.preMarketChangePercent,
+    );
   }
   return null;
 }
 
+/** Актуальная цена «сейчас» по marketState (Yahoo Finance, incl. overnight). */
+function pickCurrentSession(q) {
+  const st = String(q?.marketState || "").toUpperCase();
+
+  if (st === "OVERNIGHT") {
+    const on = overnightSessionFields(q);
+    if (on) return on;
+  }
+  if (st === "REGULAR") {
+    return sessionFields(
+      "M",
+      q?.regularMarketPrice,
+      q?.regularMarketChange,
+      q?.regularMarketChangePercent,
+    );
+  }
+  if (st === "PRE" || st === "PREPRE") {
+    const byClock = pickExtendedByLocalClock(q);
+    if (byClock) return byClock;
+    const on = overnightSessionFields(q);
+    if (on) return on;
+  }
+  if (st === "POST" || st === "POSTPOST") {
+    const byClock = pickExtendedByLocalClock(q);
+    if (byClock) return byClock;
+    const on = overnightSessionFields(q);
+    if (on) return on;
+  }
+  const on = overnightSessionFields(q);
+  if (on) return on;
+  const byClock = pickExtendedByLocalClock(q);
+  if (byClock) return byClock;
+  return sessionFields(
+    "M",
+    q?.regularMarketPrice,
+    q?.regularMarketChange,
+    q?.regularMarketChangePercent,
+  );
+}
+
+/** Вчерашнее закрытие RTH — вторая строка, когда «сейчас» уже пре/пост. */
+function pickReferenceSession(q, current) {
+  const reg = q?.regularMarketPrice;
+  if (reg == null || current?.price == null) return null;
+  if (Math.abs(Number(current.price) - Number(reg)) <= 1e-4) return null;
+
+  const st = String(q?.marketState || "").toUpperCase();
+  const extended =
+    st === "PRE" ||
+    st === "PREPRE" ||
+    st === "POST" ||
+    st === "POSTPOST" ||
+    st === "CLOSED" ||
+    current.label === "PM";
+  if (!extended && st === "REGULAR") return null;
+
+  return sessionFields(
+    "M",
+    reg,
+    q?.regularMarketChange,
+    q?.regularMarketChangePercent,
+  );
+}
+
 function formatQuote(symbol, q, _fetchedAtMs = Date.now()) {
   const currency = q?.currency || "";
-  const reg = q?.regularMarketPrice;
-  if (reg == null && q?.preMarketPrice == null && q?.postMarketPrice == null) {
-    return `Не смог получить цену для ${symbol}. Попробуй другой тикер (например: /quote AAPL).`;
-  }
-
-  const fallbackPrice = q?.regularMarketPreviousClose ?? q?.previousClose;
-  const leftPrice = reg ?? fallbackPrice;
-  if (leftPrice == null) {
-    return `Не смог получить цену для ${symbol}. Попробуй другой тикер (например: /quote AAPL).`;
-  }
-
-  const mLine = compactSessionLine(
-    "M",
-    currency,
-    leftPrice,
-    q.regularMarketChange ?? null,
-    q.regularMarketChangePercent ?? null,
-  );
-
-  const lines = [`${symbol}:`, mLine];
-
-  const ext = pickExtendedSession(q);
-  if (ext?.price != null) {
-    const regNum = reg != null ? Number(reg) : NaN;
-    const extNum = Number(ext.price);
-    const showPm =
-      !Number.isFinite(regNum) || Math.abs(extNum - regNum) > 1e-6;
-    if (showPm) {
-      const pmLine = compactSessionLine(
-        "PM",
-        currency,
-        ext.price,
-        ext.change ?? null,
-        ext.pct ?? null,
-      );
-      if (pmLine) lines.push(pmLine);
+  const current = pickCurrentSession(q);
+  if (!current) {
+    const fallback =
+      q?.regularMarketPreviousClose ??
+      q?.previousClose ??
+      q?.postMarketPrice ??
+      q?.preMarketPrice;
+    if (fallback == null) {
+      return `Не смог получить цену для ${symbol}. Попробуй другой тикер (например: /quote AAPL).`;
     }
+    const prev = q?.regularMarketPreviousClose ?? q?.previousClose;
+    const ch = prev != null ? Number(fallback) - Number(prev) : null;
+    const pct =
+      ch != null && prev != null && prev !== 0 ? (ch / Number(prev)) * 100 : null;
+    const line = compactSessionLine("M", currency, fallback, ch, pct);
+    return [`${symbol}:`, line].filter(Boolean).join("\n");
+  }
+
+  const lines = [
+    `${symbol}:`,
+    compactSessionLine(
+      current.label,
+      currency,
+      current.price,
+      current.change,
+      current.pct,
+    ),
+  ];
+
+  const ref = pickReferenceSession(q, current);
+  if (ref) {
+    lines.push(
+      compactSessionLine(ref.label, currency, ref.price, ref.change, ref.pct),
+    );
   }
 
   return lines.filter(Boolean).join("\n");
 }
 
-async function getQuote(symbol) {
-  const cached = quoteCache.get(symbol);
-  const now = Date.now();
-  if (cached && now - cached.ts < QUOTE_TTL_MS) return cached.data;
+/**
+ * Как на сайте Yahoo: overnight/pre/post/close.
+ * Обычный quote() не отдаёт overnight — только quoteSummary?overnightPrice=true.
+ */
+async function fetchYahooQuoteSummary(symbol) {
+  const price = await yahooFinance._moduleExec({
+    moduleName: "quoteSummaryOvernight",
+    query: {
+      assertSymbol: symbol,
+      url: "https://${YF_QUERY_HOST}/v10/finance/quoteSummary/" + symbol,
+      needsCrumb: true,
+      definitions: { type: "object", properties: {} },
+      schemaKey: "#/definitions/QuoteSummaryOptions",
+      defaults: {},
+      overrides: {
+        modules: "price",
+        formatted: "true",
+        overnightPrice: "true",
+      },
+      transformWith: (o) => o,
+    },
+    result: {
+      definitions: { type: "object", properties: {} },
+      schemaKey: "#/definitions/QuoteSummaryResult",
+      transformWith: (r) => r?.quoteSummary?.result?.[0]?.price,
+    },
+    moduleOptions: { validateOptions: false, validateResult: false },
+  });
+  const normalized = normalizeQuoteSummaryPrice(price);
+  if (!normalized?.regularMarketPrice && !normalized?.overnightMarketPrice) {
+    throw new Error("empty quoteSummary price");
+  }
+  return normalized;
+}
 
-  const data = await yahooFinance.quote(symbol);
-  quoteCache.set(symbol, { ts: now, data });
-  return data;
+async function getQuote(symbol) {
+  try {
+    return await fetchYahooQuoteSummary(symbol);
+  } catch (e) {
+    console.warn("quoteSummary overnight failed, fallback quote()", {
+      symbol,
+      err: e?.message || e,
+    });
+    return await yahooFinance.quote(symbol);
+  }
 }
 
 function isAllowed(ctx) {
@@ -207,8 +344,19 @@ function isAllowed(ctx) {
   return ALLOWED_CHAT_IDS.has(chatId);
 }
 
+function isReplyMessage(ctx) {
+  return Boolean(ctx.message?.reply_to_message);
+}
+
+function isReplyToBotMessage(ctx) {
+  const replied = ctx.message?.reply_to_message;
+  if (!replied) return false;
+  return Boolean(replied.from?.is_bot);
+}
+
 bot.use(async (ctx, next) => {
   if (!isAllowed(ctx)) return;
+  if (isReplyMessage(ctx) && !isReplyToBotMessage(ctx)) return;
 
   const chatId = String(ctx.chat?.id ?? "");
   const now = Date.now();

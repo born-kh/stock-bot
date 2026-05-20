@@ -6,11 +6,11 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node index.js",
-    "server": "npm install && mkdir -p logs && pm2 start ecosystem.config.cjs --update-env || pm2 reload ecosystem.config.cjs --update-env",
-    "server:stop": "pm2 stop stock-bot",
-    "server:restart": "pm2 restart stock-bot --update-env",
-    "server:logs": "pm2 logs stock-bot",
-    "server:status": "pm2 status stock-bot",
+    "server": "npm install && node -e \"require('fs').mkdirSync('logs',{recursive:true})\" && npx pm2 startOrReload ecosystem.config.cjs --update-env",
+    "server:stop": "npx pm2 stop stock-bot",
+    "server:restart": "npx pm2 restart stock-bot --update-env",
+    "server:logs": "npx pm2 logs stock-bot",
+    "server:status": "npx pm2 status stock-bot",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

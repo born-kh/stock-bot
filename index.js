@@ -374,10 +374,9 @@ bot.catch((err, ctx) => {
 });
 
 const QUICK_TICKERS = [
-  ["AAPL", "MSFT", "GOOGL"],
-  ["NVDA", "TSLA", "AMZN"],
-  ["META", "BTC-USD", "ETH-USD"],
-  ["ASTS", "OKLO"],
+  ["NVDA", "AMZN", "GOOGL"],
+  ["ASTS", "RKLB", "BMNR"],
+  ["NOW", "CRWV", "SBET"]
 ];
 
 function flatQuickTickers() {

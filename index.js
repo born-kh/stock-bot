@@ -397,11 +397,7 @@ for (const sym of flatQuickTickers()) {
 }
 
 function buildMyCommands() {
-  const list = [
-    { command: "start", description: "Справка" },
-    { command: "help", description: "Справка" },
-    { command: "quote", description: "Цена или клавиатура тикеров" },
-  ];
+  const list = [];
   const used = new Set(list.map((c) => c.command));
   for (const [cmd, sym] of TICKER_BY_COMMAND) {
     if (used.has(cmd)) continue;
